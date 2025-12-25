@@ -1,10 +1,8 @@
 /**
- * Google Contacts to Notion Sync (Parallel/Optimized Version)
+ * Google Contacts to Notion Sync (Parallel + Retry)
  * 
- * Uses parallel HTTP requests for ~15x faster syncing.
- * Can sync 500+ contacts per minute.
- * 
- * For 5,800 contacts: ~10-12 minutes total (vs 3+ hours sequential)
+ * Uses parallel HTTP requests with retry logic for reliability.
+ * Handles transient network errors gracefully.
  */
 
 // Configuration
@@ -12,12 +10,13 @@ const NOTION_DATABASE_ID = "YOUR_DATABASE_ID_HERE";
 const NOTION_API_VERSION = "2022-06-28";
 
 // Performance settings
-const BATCH_SIZE = 10;                    // Parallel requests per batch (Notion allows ~3/sec, but bursts are OK)
-const DELAY_BETWEEN_BATCHES_MS = 500;     // 500ms between batches = ~20 contacts/sec with overhead
-const MAX_EXECUTION_TIME_MS = 5 * 60 * 1000;  // Stop at 5 min to avoid timeout
+const BATCH_SIZE = 5;                     // Smaller batches = more reliable
+const DELAY_BETWEEN_BATCHES_MS = 600;     // Slightly longer delay
+const MAX_EXECUTION_TIME_MS = 5 * 60 * 1000;
+const MAX_RETRIES = 3;
 
 /**
- * Main sync function - optimized with parallel requests
+ * Main sync function with error handling
  */
 function syncContactsToNotion() {
   const startTime = Date.now();
@@ -27,7 +26,7 @@ function syncContactsToNotion() {
     throw new Error("NOTION_API_KEY not set in Script Properties.");
   }
   
-  Logger.log("🚀 Starting optimized parallel sync...");
+  Logger.log("🚀 Starting sync...");
   
   // Get existing contacts
   Logger.log("Fetching existing Notion contacts...");
@@ -53,28 +52,84 @@ function syncContactsToNotion() {
   let failed = 0;
   let batchNum = 0;
   
-  // Process in parallel batches
+  // Process in batches
   for (let i = 0; i < contactsToSync.length; i += BATCH_SIZE) {
     // Check timeout
     if (Date.now() - startTime > MAX_EXECUTION_TIME_MS) {
-      const elapsed = Math.round((Date.now() - startTime) / 1000);
-      const rate = Math.round(created / (elapsed / 60));
-      Logger.log(`⏱️ Stopping at ${elapsed}s to avoid timeout`);
-      Logger.log(`📊 Created: ${created}, Failed: ${failed}, Rate: ${rate}/min`);
-      Logger.log(`📊 Total synced: ${existingCount + created} / ${googleContacts.length}`);
-      Logger.log(`🔄 Run again to continue (${contactsToSync.length - i} remaining)`);
+      logProgress(startTime, created, failed, existingCount, googleContacts.length, contactsToSync.length - i);
       return;
     }
     
     batchNum++;
     const batch = contactsToSync.slice(i, i + BATCH_SIZE);
     
-    // Build parallel requests
+    // Process batch with retry
+    const result = processBatchWithRetry(notionApiKey, batch);
+    created += result.created;
+    failed += result.failed;
+    
+    // Progress update every 20 batches (100 contacts)
+    if (batchNum % 20 === 0) {
+      const elapsed = Math.round((Date.now() - startTime) / 1000);
+      const rate = Math.round(created / (elapsed / 60));
+      Logger.log(`Batch ${batchNum}: ${created} created, ${failed} failed, ${rate}/min`);
+    }
+    
+    // Pause between batches
+    if (i + BATCH_SIZE < contactsToSync.length) {
+      Utilities.sleep(DELAY_BETWEEN_BATCHES_MS);
+    }
+  }
+  
+  const elapsed = Math.round((Date.now() - startTime) / 1000);
+  const rate = created > 0 ? Math.round(created / (elapsed / 60)) : 0;
+  
+  Logger.log(`✅ Sync complete!`);
+  Logger.log(`📊 Created: ${created}, Failed: ${failed}, Rate: ${rate}/min`);
+  Logger.log(`📊 Total synced: ${existingCount + created} / ${googleContacts.length}`);
+}
+
+/**
+ * Process a batch with retry logic
+ */
+function processBatchWithRetry(apiKey, batch) {
+  let created = 0;
+  let failed = 0;
+  let contactsToRetry = [...batch];
+  
+  for (let attempt = 1; attempt <= MAX_RETRIES && contactsToRetry.length > 0; attempt++) {
+    const results = processBatch(apiKey, contactsToRetry);
+    
+    created += results.created;
+    
+    // Collect failed contacts for retry
+    contactsToRetry = results.failedContacts;
+    
+    if (contactsToRetry.length > 0 && attempt < MAX_RETRIES) {
+      Logger.log(`Retry attempt ${attempt + 1} for ${contactsToRetry.length} contacts...`);
+      Utilities.sleep(1000 * attempt); // Exponential backoff
+    }
+  }
+  
+  failed = contactsToRetry.length;
+  
+  return { created, failed };
+}
+
+/**
+ * Process a batch of contacts (single attempt)
+ */
+function processBatch(apiKey, batch) {
+  let created = 0;
+  const failedContacts = [];
+  
+  // Try parallel first
+  try {
     const requests = batch.map(contact => ({
       url: "https://api.notion.com/v1/pages",
       method: "POST",
       headers: {
-        "Authorization": `Bearer ${notionApiKey}`,
+        "Authorization": `Bearer ${apiKey}`,
         "Notion-Version": NOTION_API_VERSION,
         "Content-Type": "application/json"
       },
@@ -85,48 +140,60 @@ function syncContactsToNotion() {
       muteHttpExceptions: true
     }));
     
-    // Execute all requests in parallel
     const responses = UrlFetchApp.fetchAll(requests);
     
-    // Process responses
     responses.forEach((response, idx) => {
       const code = response.getResponseCode();
       if (code === 200) {
         created++;
-      } else if (code === 429) {
-        // Rate limited - will retry next run
-        failed++;
       } else {
-        const body = JSON.parse(response.getContentText());
-        Logger.log(`Error for ${batch[idx].names?.[0]?.displayName || 'Unknown'}: ${body.message || code}`);
-        failed++;
+        failedContacts.push(batch[idx]);
       }
     });
     
-    // Progress update every 10 batches (100 contacts)
-    if (batchNum % 10 === 0) {
-      const elapsed = Math.round((Date.now() - startTime) / 1000);
-      const rate = Math.round(created / (elapsed / 60));
-      Logger.log(`Batch ${batchNum}: ${created} created, ${rate}/min, ${elapsed}s elapsed`);
-    }
+  } catch (e) {
+    // If parallel fails, fall back to sequential
+    Logger.log(`Parallel request failed: ${e.message}. Trying sequential...`);
     
-    // Brief pause between batches to avoid rate limits
-    if (i + BATCH_SIZE < contactsToSync.length) {
-      Utilities.sleep(DELAY_BETWEEN_BATCHES_MS);
+    for (const contact of batch) {
+      try {
+        const response = UrlFetchApp.fetch("https://api.notion.com/v1/pages", {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${apiKey}`,
+            "Notion-Version": NOTION_API_VERSION,
+            "Content-Type": "application/json"
+          },
+          payload: JSON.stringify({
+            parent: { database_id: NOTION_DATABASE_ID },
+            properties: buildNotionProperties(contact)
+          }),
+          muteHttpExceptions: true
+        });
+        
+        if (response.getResponseCode() === 200) {
+          created++;
+        } else {
+          failedContacts.push(contact);
+        }
+        
+        Utilities.sleep(200);
+      } catch (e2) {
+        failedContacts.push(contact);
+      }
     }
   }
   
+  return { created, failedContacts };
+}
+
+function logProgress(startTime, created, failed, existingCount, total, remaining) {
   const elapsed = Math.round((Date.now() - startTime) / 1000);
-  const rate = Math.round(created / (elapsed / 60));
-  
-  Logger.log(`✅ Sync complete!`);
-  Logger.log(`📊 Created: ${created}, Failed: ${failed}`);
-  Logger.log(`📊 Rate: ${rate} contacts/min`);
-  Logger.log(`📊 Total synced: ${existingCount + created} / ${googleContacts.length}`);
-  
-  if (existingCount + created >= googleContacts.length) {
-    Logger.log("🎉 All contacts synced!");
-  }
+  const rate = created > 0 ? Math.round(created / (elapsed / 60)) : 0;
+  Logger.log(`⏱️ Stopping at ${elapsed}s to avoid timeout`);
+  Logger.log(`📊 Created: ${created}, Failed: ${failed}, Rate: ${rate}/min`);
+  Logger.log(`📊 Total synced: ${existingCount + created} / ${total}`);
+  Logger.log(`🔄 Run again to continue (${remaining} remaining)`);
 }
 
 /**
@@ -150,8 +217,7 @@ function checkSyncStatus() {
   Logger.log(`   Progress: ${pct}%`);
   
   if (remaining > 0) {
-    // At ~500/min, 5 min = ~2500 per run
-    const runsNeeded = Math.ceil(remaining / 2500);
+    const runsNeeded = Math.ceil(remaining / 400); // Conservative estimate
     Logger.log(`   Estimated runs needed: ${runsNeeded}`);
   } else {
     Logger.log(`✅ All contacts synced!`);
@@ -162,7 +228,7 @@ function checkSyncStatus() {
  * Auto-sync until complete
  */
 function startContinuousSync() {
-  stopContinuousSync(); // Clear existing
+  stopContinuousSync();
   
   ScriptApp.newTrigger('continueSyncIfNeeded')
     .timeBased()
@@ -170,33 +236,50 @@ function startContinuousSync() {
     .create();
   
   Logger.log("✅ Auto-sync started (every 10 min). Run stopContinuousSync() to cancel.");
-  syncContactsToNotion();
+  
+  // Run first sync
+  try {
+    syncContactsToNotion();
+  } catch (e) {
+    Logger.log(`⚠️ First run had error: ${e.message}`);
+    Logger.log("Will retry automatically in 10 minutes.");
+  }
 }
 
 function continueSyncIfNeeded() {
-  const notionApiKey = PropertiesService.getScriptProperties().getProperty("NOTION_API_KEY");
-  const existingContacts = getExistingNotionContacts(notionApiKey);
-  const googleContacts = getAllGoogleContacts();
-  
-  const remaining = googleContacts.filter(c => !existingContacts[c.resourceName]).length;
-  
-  if (remaining === 0) {
-    Logger.log("🎉 All synced! Removing trigger.");
-    stopContinuousSync();
-    return;
+  try {
+    const notionApiKey = PropertiesService.getScriptProperties().getProperty("NOTION_API_KEY");
+    const existingContacts = getExistingNotionContacts(notionApiKey);
+    const googleContacts = getAllGoogleContacts();
+    
+    const remaining = googleContacts.filter(c => !existingContacts[c.resourceName]).length;
+    
+    if (remaining === 0) {
+      Logger.log("🎉 All synced! Removing trigger.");
+      stopContinuousSync();
+      return;
+    }
+    
+    Logger.log(`${remaining} remaining. Continuing...`);
+    syncContactsToNotion();
+  } catch (e) {
+    Logger.log(`⚠️ Error in continueSyncIfNeeded: ${e.message}`);
+    Logger.log("Will retry in 10 minutes.");
   }
-  
-  Logger.log(`${remaining} remaining. Continuing...`);
-  syncContactsToNotion();
 }
 
 function stopContinuousSync() {
-  ScriptApp.getProjectTriggers().forEach(t => {
+  const triggers = ScriptApp.getProjectTriggers();
+  let removed = 0;
+  triggers.forEach(t => {
     if (t.getHandlerFunction() === 'continueSyncIfNeeded') {
       ScriptApp.deleteTrigger(t);
+      removed++;
     }
   });
-  Logger.log("Auto-sync stopped.");
+  if (removed > 0) {
+    Logger.log(`Auto-sync stopped (${removed} trigger(s) removed).`);
+  }
 }
 
 /**
@@ -223,7 +306,7 @@ function getAllGoogleContacts() {
 }
 
 /**
- * Get existing Notion contacts (parallelized)
+ * Get existing Notion contacts
  */
 function getExistingNotionContacts(apiKey) {
   const contacts = {};
@@ -262,7 +345,7 @@ function getExistingNotionContacts(apiKey) {
 }
 
 /**
- * Build Notion properties from Google Contact
+ * Build Notion properties
  */
 function buildNotionProperties(contact) {
   const props = {
@@ -277,17 +360,14 @@ function buildNotionProperties(contact) {
     }
   };
   
-  // Email
   if (contact.emailAddresses?.[0]?.value) {
     props["Email"] = { email: contact.emailAddresses[0].value };
   }
   
-  // Phone
   if (contact.phoneNumbers?.[0]?.value) {
     props["Phone"] = { phone_number: contact.phoneNumbers[0].value };
   }
   
-  // Organization
   const org = contact.organizations?.[0];
   if (org?.name) {
     props["Company"] = { rich_text: [{ text: { content: org.name } }] };
@@ -296,7 +376,6 @@ function buildNotionProperties(contact) {
     props["Job Title"] = { rich_text: [{ text: { content: org.title } }] };
   }
   
-  // Birthday
   const bday = contact.birthdays?.[0]?.date;
   if (bday) {
     const year = bday.year || 1900;
@@ -305,7 +384,6 @@ function buildNotionProperties(contact) {
     props["Birthdate"] = { date: { start: `${year}-${month}-${day}` } };
   }
   
-  // Address
   const addr = contact.addresses?.[0];
   if (addr) {
     const fullAddress = [addr.streetAddress, addr.city, addr.region, addr.postalCode, addr.country]
