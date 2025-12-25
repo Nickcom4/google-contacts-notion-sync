@@ -8,7 +8,7 @@
  */
 
 // Configuration
-const NOTION_DATABASE_ID = "2d36e3b81dda8133858ef11e90147eb5";
+const NOTION_DATABASE_ID = "YOUR_DATABASE_ID_HERE";
 const NOTION_API_VERSION = "2022-06-28";
 
 // Performance settings
