@@ -1,13 +1,14 @@
 # Google Contacts to Notion Sync
 
-Automatically sync your Google Contacts to a Notion database using Google Apps Script. Keep your contacts organized in Notion with a clickable link back to the full contact in Google Contacts.
+Automatically sync your Google Contacts to a Notion database using Google Apps Script. Uses parallel HTTP requests for fast syncing (~100-150 contacts/minute).
 
 ## Features
 
-- **One-way sync**: Google Contacts → Notion (prevents accidental overwrites)
-- **Automatic deduplication**: Uses Google Contact ID to avoid duplicates
-- **Daily sync**: Set up a trigger to keep contacts updated automatically
-- **Direct links**: Each Notion entry includes a link to open the contact in Google Contacts
+- **Fast parallel sync**: Uses `UrlFetchApp.fetchAll()` for ~3-4x faster syncing
+- **Auto-resume**: Stops before timeout, picks up where it left off
+- **No duplicates**: Tracks contacts by Google Contact ID
+- **Automatic mode**: Set-and-forget continuous sync until complete
+- **Direct links**: Each Notion entry links back to Google Contacts
 
 ## Synced Fields
 
@@ -19,9 +20,9 @@ Automatically sync your Google Contacts to a Notion database using Google Apps S
 | Company | Google | Organization name |
 | Job Title | Google | Job title at organization |
 | Birthdate | Google | Birthday (uses 1900 if year unknown) |
-| Full Address | Google | Complete address (street, city, state, zip, country) |
-| Country | Google | Country (separate field for filtering) |
-| Contact Link | Generated | URL to open contact in Google Contacts |
+| Full Address | Google | Complete address |
+| Country | Google | Country (for filtering) |
+| Contact Link | Generated | URL to open in Google Contacts |
 | Google Contact ID | Generated | Internal ID for sync tracking |
 | Relationship | Manual | Your custom categorization |
 | Comms Channel | Manual | Preferred communication method |
@@ -30,41 +31,140 @@ Automatically sync your Google Contacts to a Notion database using Google Apps S
 
 ---
 
-## Setup Instructions
+## Quick Start
 
-### Step 1: Create the Notion Database
+### 1. Create a Notion Integration
 
-You have two options:
+1. Go to [notion.so/my-integrations](https://www.notion.so/my-integrations)
+2. Click **"New integration"**
+3. Name it "Google Contacts Sync"
+4. Copy the **Internal Integration Token** (starts with `ntn_` or `secret_`)
 
-#### Option A: Run the Setup Script (Recommended)
+### 2. Create the Notion Database
 
-1. Get a Notion API key:
-   - Go to [notion.so/my-integrations](https://www.notion.so/my-integrations)
-   - Click "New integration"
-   - Name it "Google Contacts Sync"
-   - Copy the "Internal Integration Token"
+**Option A: Run the setup script**
+```bash
+cd notion-setup
+npm install
+node create-database.js
+```
 
-2. Share a Notion page with your integration:
-   - Open the Notion page where you want the database
-   - Click "..." menu → "Connections" → Find your integration → "Confirm"
+**Option B: Create manually** — see [Database Schema](#database-schema) below
 
-3. Install Node.js if you don't have it: [nodejs.org](https://nodejs.org)
+### 3. Share the Database with Your Integration
 
-4. Run the setup script:
-   ```bash
-   cd notion-setup
-   npm install
-   node create-database.js
+1. Open your Notion database
+2. Click **"..."** menu → **"Connections"**
+3. Find your integration → **"Confirm"**
+
+### 4. Set Up Google Apps Script
+
+1. Go to [script.google.com](https://script.google.com) → **New project**
+2. Delete any existing code
+3. Copy contents of `apps-script/GoogleContactsToNotion.gs` and paste
+4. Update the database ID:
+   ```javascript
+   const NOTION_DATABASE_ID = "your-32-character-database-id";
    ```
 
-5. Follow the prompts to enter your API key and parent page URL
+### 5. Add Your API Key (Secure Storage)
 
-#### Option B: Create Manually in Notion
+1. Click ⚙️ **Project Settings** (gear icon)
+2. Scroll to **Script Properties** → **Add script property**
+3. Property: `NOTION_API_KEY`
+4. Value: Your Notion integration token
+5. Click **Save**
 
-Create a new database in Notion with these properties:
+### 6. Enable Google People API
 
-| Property Name | Type |
-|---------------|------|
+1. In left sidebar, click ➕ next to **"Services"**
+2. Find **"People API"** → **Add**
+
+### 7. Test & Run
+
+1. Select `testSetup` from dropdown → **Run** → Authorize when prompted
+2. Check logs for ✅ confirmations
+3. Select `syncContactsToNotion` → **Run**
+
+---
+
+## Available Functions
+
+| Function | Description |
+|----------|-------------|
+| `testSetup()` | Verify API connections are working |
+| `syncContactsToNotion()` | Sync one batch (~600 contacts in 5 min) |
+| `checkSyncStatus()` | Show progress: synced vs remaining |
+| `startContinuousSync()` | Auto-run every 10 min until complete |
+| `stopContinuousSync()` | Cancel the automatic sync |
+
+---
+
+## Usage Guide
+
+### Initial Sync (Large Contact Lists)
+
+For lists over 500 contacts, the script runs in batches to avoid the 6-minute Apps Script timeout.
+
+**Recommended: Automatic mode**
+```
+1. Run startContinuousSync()
+2. Close the tab — it runs in the background
+3. Check back in 1-2 hours
+4. Sync stops automatically when complete
+```
+
+**Alternative: Manual mode**
+```
+1. Run syncContactsToNotion()
+2. Wait for completion (~5 min)
+3. Run checkSyncStatus() to see progress
+4. Repeat until done
+```
+
+### Performance
+
+| Contacts | Estimated Time |
+|----------|----------------|
+| 500 | ~5 minutes (1 run) |
+| 2,000 | ~20 minutes (3-4 runs) |
+| 5,000 | ~45 minutes (8-9 runs) |
+| 10,000 | ~90 minutes (15-17 runs) |
+
+*Based on ~100-150 contacts/minute. Actual speed depends on Notion API responsiveness.*
+
+### Ongoing Sync
+
+After initial sync, set up a daily trigger to keep contacts updated:
+
+1. Click ⏰ **Triggers** in left sidebar
+2. **+ Add Trigger**
+3. Function: `syncContactsToNotion`
+4. Event source: **Time-driven**
+5. Type: **Day timer**
+6. Time: Choose off-peak hours (e.g., 2-3 AM)
+7. **Save**
+
+### Checking Progress
+
+Run `checkSyncStatus()` anytime to see:
+```
+📊 Sync Status:
+   Total Google Contacts: 5854
+   Synced to Notion: 2341
+   Remaining: 3513
+   Progress: 40%
+   Estimated runs needed: 6
+```
+
+---
+
+## Database Schema
+
+If creating the database manually, use these property types:
+
+| Property | Type |
+|----------|------|
 | Name | Title |
 | Email | Email |
 | Phone | Phone |
@@ -82,134 +182,36 @@ Create a new database in Notion with these properties:
 
 ---
 
-### Step 2: Set Up Google Apps Script
-
-1. **Create a new Apps Script project**
-   - Go to [script.google.com](https://script.google.com)
-   - Click "New project"
-   - Name it "Google Contacts to Notion Sync"
-
-2. **Copy the script**
-   - Delete any existing code in the editor
-   - Copy the entire contents of `apps-script/GoogleContactsToNotion.gs`
-   - Paste into the editor
-
-3. **Update the database ID**
-   - Find your Notion database URL (it looks like `notion.so/workspace/abc123...`)
-   - Copy the 32-character ID from the URL
-   - In the script, replace the `NOTION_DATABASE_ID` value:
-     ```javascript
-     const NOTION_DATABASE_ID = "your-database-id-here";
-     ```
-
-4. **Add your Notion API key securely**
-   - Click ⚙️ "Project Settings" (gear icon in left sidebar)
-   - Scroll down to "Script Properties"
-   - Click "Add script property"
-   - Property: `NOTION_API_KEY`
-   - Value: Your Notion integration token (from Step 1)
-   - Click "Save script properties"
-
-5. **Enable the People API**
-   - In the left sidebar, click ➕ next to "Services"
-   - Scroll to find "People API"
-   - Click "Add"
-
-6. **Save the project**
-   - Press `Ctrl+S` or `Cmd+S`
-
----
-
-### Step 3: Test the Setup
-
-1. In the Apps Script editor, select `testSetup` from the function dropdown
-2. Click "Run"
-3. If prompted, authorize the script to access your Google Contacts
-4. Check the "Execution log" at the bottom for results:
-   - ✅ NOTION_API_KEY found
-   - ✅ Connected to Notion database: [Your Database Name]
-   - ✅ Google Contacts API working
-
-If you see any ❌ errors, check:
-- API key is correct in Script Properties
-- Database is shared with your integration
-- People API is enabled in Services
-
----
-
-### Step 4: Run Your First Sync
-
-1. Select `syncContactsToNotion` from the function dropdown
-2. Click "Run"
-3. Wait for it to complete (may take a few minutes for large contact lists)
-4. Check your Notion database!
-
----
-
-### Step 5: Set Up Automatic Daily Sync
-
-1. In the left sidebar, click ⏰ "Triggers"
-2. Click "+ Add Trigger" (bottom right)
-3. Configure:
-   - Function: `syncContactsToNotion`
-   - Deployment: `Head`
-   - Event source: `Time-driven`
-   - Type: `Day timer`
-   - Time: Choose a time (e.g., 2am-3am)
-4. Click "Save"
-
----
-
-## Usage
-
-### Viewing Contacts in Google
-
-Each contact in Notion has a "Contact Link" field. Click it to open the full contact details in Google Contacts.
-
-### Manual Fields
-
-These fields are not synced from Google and are for your own organization:
-
-- **Relationship**: Categorize contacts (Friend, Business, etc.)
-- **Comms Channel**: Track preferred communication method
-- **Contact info**: Add your own notes
-- **Archived**: Hide inactive contacts from your main view
-
-### Re-running Sync
-
-- **Manual**: Go to Apps Script → Run `syncContactsToNotion`
-- **Automatic**: Happens daily if you set up a trigger
-
-### Adding New Contacts
-
-1. Add the contact in Google Contacts
-2. Wait for the next automatic sync, or run manually
-3. The contact will appear in Notion
-
----
-
 ## Troubleshooting
 
 ### "NOTION_API_KEY not found"
-- Go to Project Settings → Script Properties
-- Make sure `NOTION_API_KEY` is set correctly
+→ Add it in Project Settings → Script Properties
 
 ### "Could not find database"
-- Make sure the database ID is correct (32 characters, no dashes)
-- Make sure the database is shared with your integration
+→ Check database ID (32 chars, no dashes) and that it's shared with your integration
 
 ### "Google Contacts API failed"
-- Make sure People API is added in Services
-- Re-authorize the script if needed
+→ Enable People API in Services menu
 
-### Contacts not appearing
-- Check the Execution log for errors
-- Verify the contact exists in Google Contacts (not just Gmail)
-- Some contacts may be skipped if they have no name
+### Sync is slow
+→ Normal rate is 100-150/min. Notion rate-limits API requests.
 
-### Rate limiting
-- The script includes a 350ms delay between API calls
-- For very large contact lists (1000+), the script may take 10+ minutes
+### "Exceeded maximum execution time"
+→ Expected for large lists. Just run again — it resumes automatically.
+
+### Some contacts missing
+→ Contacts without names may be skipped. Check execution logs for errors.
+
+---
+
+## How It Works
+
+1. **Fetches all Google Contacts** via People API
+2. **Queries Notion** for existing contacts (by Google Contact ID)
+3. **Filters** to only unsynced contacts
+4. **Sends parallel requests** in batches of 10
+5. **Stops at 5 minutes** to avoid timeout
+6. **Resumes** on next run (already-synced contacts are skipped)
 
 ---
 
@@ -217,36 +219,25 @@ These fields are not synced from Google and are for your own organization:
 
 ```
 google-contacts-notion-sync/
-├── README.md                 # This file
+├── README.md
 ├── apps-script/
-│   └── GoogleContactsToNotion.gs   # The main sync script
+│   └── GoogleContactsToNotion.gs   # Main sync script
 └── notion-setup/
-    ├── package.json          # Node.js dependencies
-    └── create-database.js    # Script to create Notion database
+    ├── package.json
+    └── create-database.js          # Database creation helper
 ```
 
 ---
 
-## Security Notes
+## Security
 
 ⚠️ **Never commit API keys to version control**
 
-- The Notion API key is stored in Google Apps Script's "Script Properties" (encrypted)
-- If you accidentally expose your API key, regenerate it immediately at [notion.so/my-integrations](https://www.notion.so/my-integrations)
-
----
-
-## Future Enhancements
-
-Want to extend this? Here are some ideas:
-
-- **Two-way sync**: Push Notion changes back to Google Contacts
-- **Selective sync**: Only sync contacts with specific labels
-- **Additional fields**: Sync notes, websites, custom fields
-- **Conflict resolution**: Handle cases where both sides changed
+- Notion API key is stored in Apps Script's encrypted Script Properties
+- If exposed, regenerate immediately at [notion.so/my-integrations](https://www.notion.so/my-integrations)
 
 ---
 
 ## License
 
-MIT License - Feel free to use and modify as needed.
+MIT License — use and modify freely.
