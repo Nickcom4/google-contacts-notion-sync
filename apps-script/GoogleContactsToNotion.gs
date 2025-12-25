@@ -286,9 +286,10 @@ function continueSyncIfNeeded() {
       // Verify with Notion
       const existing = getExistingNotionContacts(notionApiKey);
       if (Object.keys(existing).length >= totalContacts) {
-        Logger.log("🎉 All synced! Stopping.");
+        Logger.log("🎉 Initial sync complete! Switching to hourly maintenance.");
         stopContinuousSync();
         clearSyncCache();
+        startMaintenanceSync(); // Start hourly maintenance
         return;
       }
     }
@@ -300,12 +301,55 @@ function continueSyncIfNeeded() {
 }
 
 function stopContinuousSync() {
+  let removed = 0;
   ScriptApp.getProjectTriggers().forEach(t => {
     if (t.getHandlerFunction() === 'continueSyncIfNeeded') {
       ScriptApp.deleteTrigger(t);
+      removed++;
     }
   });
-  Logger.log("Auto-sync stopped.");
+  if (removed > 0) Logger.log("Auto-sync stopped.");
+}
+
+/**
+ * Start hourly maintenance sync (for ongoing updates after initial sync)
+ */
+function startMaintenanceSync() {
+  stopMaintenanceSync(); // Clear existing
+  
+  ScriptApp.newTrigger('maintenanceSync')
+    .timeBased()
+    .everyHours(1)
+    .create();
+  
+  Logger.log("✅ Hourly maintenance sync started.");
+}
+
+/**
+ * Stop hourly maintenance sync
+ */
+function stopMaintenanceSync() {
+  let removed = 0;
+  ScriptApp.getProjectTriggers().forEach(t => {
+    if (t.getHandlerFunction() === 'maintenanceSync') {
+      ScriptApp.deleteTrigger(t);
+      removed++;
+    }
+  });
+  if (removed > 0) Logger.log("Maintenance sync stopped.");
+}
+
+/**
+ * Hourly maintenance - syncs new/updated contacts
+ */
+function maintenanceSync() {
+  try {
+    Logger.log("🔄 Running hourly maintenance sync...");
+    clearSyncCache(); // Always fetch fresh for maintenance
+    syncContactsToNotion();
+  } catch (e) {
+    Logger.log(`⚠️ Maintenance error: ${e.message}`);
+  }
 }
 
 /**
