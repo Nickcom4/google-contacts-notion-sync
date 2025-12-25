@@ -1,0 +1,18 @@
+{
+  "name": "notion-contacts-setup",
+  "version": "1.0.0",
+  "description": "Setup script for creating Google Contacts sync database in Notion",
+  "main": "create-database.js",
+  "scripts": {
+    "setup": "node create-database.js"
+  },
+  "dependencies": {
+    "@notionhq/client": "^2.2.14"
+  },
+  "keywords": [
+    "notion",
+    "google-contacts",
+    "sync"
+  ],
+  "license": "MIT"
+}
